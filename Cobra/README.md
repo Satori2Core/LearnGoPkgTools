@@ -32,6 +32,14 @@
 
 ## Cobra 使用的基本认识
 
+### 0. 包引入
+
+```bash
+go get github.com/spf13/cobra
+```
+
+---
+
 ### 1. 简单代码与使用示例
 
 > Go 代码示例
