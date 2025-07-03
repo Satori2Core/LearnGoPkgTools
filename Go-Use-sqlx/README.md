@@ -150,7 +150,8 @@ sqlx_learning 数据库删除成功！
 
 ### 2.2 创建数据表
 
-- **关键方法**：`Exec(sql)`
+- **关键方法**：`Exec(query string, args ...interface{})`
+- 执行写操作（INSERT/UPDATE/DELETE）
 
 #### 2.2.1 模型定义
 
@@ -231,3 +232,120 @@ func createTasksTable() {
 ## 3. 基本 CRUD 操作
 
 > 基于前文创建的数据表与模型
+
+### 3.1 核心方法表
+
+|类别​	|​方法签名​	|​说明​	|​使用场景​	|​返回值​|
+|:-----|:-----|:-----|:-----|:-----|
+|​连接管理​	|sqlx.Connect(driverName, dataSourceName string) (*DB, error)	|创建连接并立即 |ping 数据库验证	应用程序启动时建立数据库连接	|*sqlx.DB|
+||sqlx.Open(driverName, dataSourceName string) (*DB, error)	|创建连接但不立即验证	|延迟验证的场景	|*sqlx.DB|
+||db.Ping() error	|检查数据库连接是否有效	|健康检查、连接池维护	|error|
+|​单行查询​	|db.Get(dest interface{}, query string, args ...interface{}) error	|查询单行数据到结构体	|按 ID 查询、获取单个对象	|error|
+||db.GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error	|带上下文的单行查询	|需要超时控制或取消的单行查询	|error|
+|​多行查询​	|db.Select(dest interface{}, query string, args ...interface{}) error	|查询多行数据到结构体切片	|列表查询、获取多个对象	|error|
+||db.SelectContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error	|带上下文的多行查询	|需要超时控制或取消的多行查询	|error|
+|​原始查询​	|db.Query(query string, args ...interface{}) (*sql.Rows, error)	|执行 SQL 返回原始 Rows 对象	|复杂查询、需要手动扫描结果	|*sql.Rows, error|
+||db.QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)	|带上下文的原始查询	|需要控制执行时间的复杂查询	|*sql.Rows, error|
+|​写操作​	|db.Exec(query string, args ...interface{}) (sql.Result, error)	|执行写操作（INSERT/UPDATE/DELETE）	|数据修改操作	|sql.Result, error|
+||db.ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)	|带上下文的写操作	需要超时控制的修改操作	|sql.Result, error|
+|​命名参数操作​	|db.NamedExec(query string, arg interface{}) (sql.Result, error)	|使用命名参数的写操作	|使用结构体作为参数的数据操作	|sql.Result, error|
+||db.NamedQuery(query string, arg interface{}) (*sqlx.Rows, error)	|使用命名参数的查询	|使用结构体作为参数的查询	|*sqlx.Rows, error|
+|​IN 查询​	|sqlx.In(query string, args ...interface{}) (string, []interface{}, error)	|生成 IN 查询的安全 SQL	查询多个值（如 WHERE id IN (?, ?, ?)）	(string, []interface{}, error)
+|​事务管理​	|db.Beginx() (*sqlx.Tx, error)	|开启事务	|需要原子性操作的场景（转账、订单处理）	|*sqlx.Tx|
+||db.BeginTxx(ctx context.Context, opts *sql.TxOptions) (*sqlx.Tx, error)	|带上下文的事务开启	需|要控制事务执行时间的场景	|*sqlx.Tx|
+|​预处理语句​	|db.Prepare(query string) (*sql.Stmt, error)	|创建预处理语句	|重复执行的 SQL 语句	|*sql.Stmt|
+||db.Preparex(query string) (*sqlx.Stmt, error)	|创建支持 Get/Select 的预处理语句	|复用查询结构	|*sqlx.Stmt|
+||db.PrepareNamed(query string) (*sqlx.NamedStmt, error)	|创建命名参数预处理语句	|复用命名参数查询	|*sqlx.NamedStmt|
+
+---
+
+### 3.2 事务对象方法 (sqlx.Tx)
+
+- **前置方法**：
+	- `db.Beginx() (*sqlx.Tx, error)`
+	- `db.BeginTxx(ctx context.Context, opts *sql.TxOptions) (*sqlx.Tx, error)`
+
+|方法​	|​说明​|
+|:----|:----|
+|tx.Commit() error	|提交事务|
+|tx.Rollback() error	|回滚事务|
+|tx.Exec()	|与 db.Exec 相同，但在事务中执行|
+|tx.ExecContext()	|与 db.ExecContext 相同，但在事务中执行|
+|tx.Get()	|与 db.Get 相同，但在事务中执行|
+|tx.GetContext()	|与 db.GetContext 相同，但在事务中执行|
+|tx.Select()	|与 db.Select 相同，但在事务中执行|
+|tx.SelectContext()	|与 db.SelectContext 相同，但在事务中执行|
+|tx.NamedExec()	|与 db.NamedExec 相同，但在事务中执行|
+|tx.Prepare()	|与 db.Prepare 相同，但在事务中执行|
+
+---
+
+### 3.3 其他方法
+
+|​方法​	|​说明​|
+|:----|:----|
+|db.Rebind(query string) string	|适配不同数据库的参数占位符（? → 1,2 等）|
+|db.MustExec()	|执行 SQL，出错时 panic（适合初始化脚本）|
+|db.MustBegin()	|开启事务，出错时 panic|
+|db.StructScan(row *sql.Rows, dest interface{}) error	手|动将行扫描到结构体|
+
+---
+
+### 3.4 方法的简单使用示例
+
+#### 3.4.1 简单查询
+
+```go
+user := User{}
+err := db.Get(&user, "SELECT * FROM users WHERE id = ?", 1)
+```
+
+---
+
+#### 3.4.2 ​命名参数
+
+```go
+result, err := db.NamedExec(
+    "INSERT INTO users (name, email) VALUES (:name, :email)", 
+    User{Name: "Alice", Email: "alice@example.com"}
+)
+```
+
+---
+
+#### 3.4.3 事务处理
+
+```go
+tx, err := db.Beginx()
+// ...执行事务操作...
+if err != nil {
+    tx.Rollback()
+} else {
+    tx.Commit()
+}
+```
+
+---
+
+#### 3.4.4 ​IN 查询
+
+```go
+query, args, _ := sqlx.In("SELECT * FROM users WHERE id IN (?)", []int{1,2,3})
+users := []User{}
+err := db.Select(&users, db.Rebind(query), args...)
+```
+
+---
+
+#### 3.4.5 ​预处理
+
+```go
+stmt, err := db.Preparex("SELECT * FROM users WHERE id = ?")
+// 复用预处理语句
+for _, id := range ids {
+    var user User
+    stmt.Get(&user, id)
+}
+```
+
+---
