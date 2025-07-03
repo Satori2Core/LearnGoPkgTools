@@ -1,4 +1,4 @@
-# Go & SQLx库 —— 使用指南
+# Go & SQLx库 —— 数据库表操作使用指南
 
 ## 1. 安装与初始化
 
@@ -148,3 +148,86 @@ sqlx_learning 数据库删除成功！
 
 ---
 
+### 2.2 创建数据表
+
+- **关键方法**：`Exec(sql)`
+
+#### 2.2.1 模型定义
+
+```go
+type User struct {
+    ID        int64     `db:"id" json:"id"`
+    Username  string    `db:"username" json:"username"`
+    Email     string    `db:"email" json:"email"`
+    Password  string    `db:"password" json:"-"`
+    CreatedAt time.Time `db:"created_at" json:"created_at"`
+    UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type Task struct {
+    ID          int64     `db:"id" json:"id"`
+    UserID      int64     `db:"user_id" json:"user_id"`
+    Title       string    `db:"title" json:"title"`
+    Description string    `db:"description" json:"description"`
+    Status      string    `db:"status" json:"status"` // 'pending', 'in_progress', 'completed'
+    DueDate     time.Time `db:"due_date" json:"due_date"`
+    CreatedAt   time.Time `db:"created_at" json:"created_at"`
+    UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+```
+
+---
+
+#### 2.2.2 创建数据表
+
+```go
+func createUsersTable() {
+    query := `
+        CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(50) NOT NULL UNIQUE,
+            email VARCHAR(100) NOT NULL UNIQUE,
+            password VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `
+    
+    _, err := db.Exec(query)
+    if err != nil {
+        log.Fatalf("创建 users 表失败: %v", err)
+    }
+    
+    fmt.Println("users 表创建成功！")
+}
+
+func createTasksTable() {
+    query := `
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            description TEXT,
+            status ENUM('pending', 'in_progress', 'completed') DEFAULT 'pending',
+            due_date DATETIME,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `
+    
+    _, err := db.Exec(query)
+    if err != nil {
+        log.Fatalf("创建 tasks 表失败: %v", err)
+    }
+    
+    fmt.Println("tasks 表创建成功！")
+}
+```
+
+---
+
+
+## 3. 基本 CRUD 操作
+
+> 基于前文创建的数据表与模型
