@@ -349,3 +349,131 @@ for _, id := range ids {
 ```
 
 ---
+
+## 4. Go 结构体中的 db 标签
+
+### 4.1 Go 原生database/sql 与结构体 db 标签
+
+- 在 `Go` 的原生 `database/sql` 包中，​不需要也不支持 `db` 标签。
+- 原生库完全不使用结构体标签进行数据库列与结构体字段的映射。
+
+#### 4.1.1 查询结果必须手动映射
+
+```go
+type Product struct {
+    ID    int
+    Name  string
+    Price float64
+}
+
+func getProduct(db *sql.DB, id int) (*Product, error) {
+    row := db.QueryRow("SELECT id, name, price FROM products WHERE id = ?", id)
+    
+    var p Product
+    // 手动扫描每列到对应字段
+    err := row.Scan(&p.ID, &p.Name, &p.Price)
+    if err != nil {
+        return nil, err
+    }
+    
+    return &p, nil
+}
+```
+
+---
+
+#### 4.1.2 多行查询也需要手动遍历
+
+```go
+func listProducts(db *sql.DB) ([]Product, error) {
+    rows, err := db.Query("SELECT id, name, price FROM products")
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var products []Product
+    for rows.Next() {
+        var p Product
+        // 每行都需要手动扫描
+        if err := rows.Scan(&p.ID, &p.Name, &p.Price); err != nil {
+            return nil, err
+        }
+        products = append(products, p)
+    }
+    
+    return products, nil
+}
+```
+
+---
+
+#### 4.1.3 字段顺序必须严格匹配
+
+```sql
+SELECT id, name, price FROM products
+```
+
+```go
+// 扫描顺序必须严格匹配 SELECT 顺序
+err := row.Scan(&p.ID, &p.Name, &p.Price)
+```
+
+---
+
+#### 4.1.4 原生库不支持命名参数
+
+```go
+// ❌ 无法这样使用原生库
+_, err := db.Exec(
+    "INSERT INTO products (name, price) VALUES (:name, :price)",
+    &Product{Name: "Laptop", Price: 999.99}
+)
+```
+
+#### 4.1.5 原生库中的列映射注意事项
+
+**【列名与字段名的关系】**
+
+- 在原生库中，列名与结构体字段名**完全无关**。扫描时只关心列的顺序：
+
+```go
+// 即使有标签也没用 - 原生库会忽略
+type Product struct {
+    ID    int     `db:"product_id"`
+    Name  string  `db:"product_name"`
+    Price float64
+}
+
+// 扫描时仍然需要按SELECT顺序
+err := row.Scan(&p.ID, &p.Name, &p.Price)
+```
+
+---
+
+**【处理 NULL 值】**
+
+- 原生库需要特殊处理 NULL 值：
+
+```go
+var name sql.NullString
+var price sql.NullFloat64
+
+err := row.Scan(&p.ID, &name, &price)
+
+// 使用前需验证
+if name.Valid {
+    p.Name = name.String
+} else {
+    p.Name = "N/A"
+}
+```
+
+---
+
+### 4.2 SQLx 与结构体 db 标签
+
+- 在 SQLx 中，当**没有 db 标签**时，SQLx **​不会报错**，但是它的行为取决于具体的使用场景和配置。
+
+
+---
