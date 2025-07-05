@@ -1,5 +1,11 @@
 # Go 结构化日志库 log/slog
 
+> 【一、什么是结构化日志】、【二、slog 与 三方库】为 deepseek 给出的解读。
+
+> 可能由于 deepseek 参照的版本不是最新的，部分内容存在差异
+
+> 从【三、slog 核心组件】开始，结合 ai 给出的大纲自行内容总结。
+
 ## 一、什么是结构化日志
 
 **传统日志**（如：`log.Println`）：
@@ -77,7 +83,7 @@ slog.Info("查询完成", "duration_ms", slog.Int("value", 85))
 ### 1. 四大核心组件关联图
 
 ```plaintext
-[Logger] -> 记录日志 (Info/Error/Debug)
+[Logger] -> 记录日志 (Info/Error/Debug/...)
   │
   ▼ 生成 [Record] (包含时间/级别/消息/Attrs)
   │
@@ -126,7 +132,7 @@ func main() {
 **【示例二】**：输出结构化日志信息
 
 - 指定的入参：`args ...any`
-- 输出的格式：key=value（类似于键值，实际后文会有介绍）
+- 输出的格式：key=value
 
 ```go
 func main() {
@@ -141,7 +147,8 @@ func main() {
 
 #### 2.2 日志方法源码浅识（以Info为例）
 
-**源码认识**
+**源码**：`log/slog/logger.go`
+
 ```go
 // 无上下文版本
 // Info calls [Logger.Info] on the default logger.
@@ -159,16 +166,63 @@ func InfoContext(ctx context.Context, msg string, args ...any) {
 }
 ```
 
+在业务使用中，我们可以直接调用全局方法来进行日志的指定输出，如上源码：
+- 对于全局日志方法是有一个默认实例的，通过默认实例来调用`Logger`内部方法
+- 默认实例方法如下：
+```go
+var defaultLogger atomic.Pointer[Logger]
+
+// 使用 init 初始一个默认的 Logger 实例
+func init() {
+    // defaultLogger.Store 源码位于：sync/atomic/type.go
+    // newDefaultHandler 即，创建一个默认的 Handler
+    // Logger：日志记录的门面，本身不处理格式/输出，仅转发给 Handler 作实际操作
+	defaultLogger.Store(New(newDefaultHandler(loginternal.DefaultOutput)))
+}
+
+// New creates a new Logger with the given non-nil Handler.
+func New(h Handler) *Logger {
+	if h == nil {
+		panic("nil Handler")
+	}
+	return &Logger{handler: h}
+}
+
+// Default returns the default [Logger].
+func Default() *Logger { return defaultLogger.Load() }
+```
+
 ---
 
-#### 2.3 基本日志方法表
+**`Logger.log`方法**
 
-
+```go
+// log is the low-level logging method for methods that take ...any.
+// It must always be called directly by an exported logging method
+// or function, because it uses a fixed call depth to obtain the pc.
+func (l *Logger) log(ctx context.Context, level Level, msg string, args ...any) {
+	if !l.Enabled(ctx, level) {
+		return
+	}
+	var pc uintptr
+	if !internal.IgnorePC {
+		var pcs [1]uintptr
+		// skip [runtime.Callers, this function, this function's caller]
+		runtime.Callers(3, pcs[:])
+		pc = pcs[0]
+	}
+	r := NewRecord(time.Now(), level, msg, pc)
+	r.Add(args...)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_ = l.Handler().Handle(ctx, r)
+}
+```
 
 ---
 
-
-#### 2.4 设计亮点
+#### 2.3 设计亮点
 - 轻量级封装​：Logger 本身不处理格式/输出，仅转发给 Handler
 - ​不可变设计​：WithAttrs() 返回新 Logger 实例，避免并发冲突
 
@@ -191,5 +245,11 @@ func (l *Logger) clone() *Logger {
 	return &c
 }
 ```
+
+---
+
+### 3. Handler 接口：处理器
+
+**源码定位**​：`log/slog/handler.go`
 
 ---
