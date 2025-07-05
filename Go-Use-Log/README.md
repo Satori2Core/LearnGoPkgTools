@@ -68,7 +68,7 @@ slog.Info("查询完成", "duration_ms", slog.Int("value", 85))
 
 ---
 
-## 三、slog 核心组件
+## 三、slog 核心组件 与 源码浅析
 
 
 |概念	|作用|
@@ -211,6 +211,7 @@ func (l *Logger) log(ctx context.Context, level Level, msg string, args ...any) 
 		runtime.Callers(3, pcs[:])
 		pc = pcs[0]
 	}
+    // 创建一个 Record 记录
 	r := NewRecord(time.Now(), level, msg, pc)
 	r.Add(args...)
 	if ctx == nil {
@@ -248,8 +249,368 @@ func (l *Logger) clone() *Logger {
 
 ---
 
+#### 2.4 Logger 的完整生命周期
+
+假设调用 `logger.Info("msg", "k", v)`：
+
+- ​参数封装​ → args...any 被转换为 []Attr（见 log/slog/record.go: Add()）
+- 构建 Record​ → 合并时间/级别/消息/PC值
+（NewRecord() + runtime.Callers()）
+- ​Handler 路由​ → logger.handler.Handle(ctx, r)
+（多态分发到 Text/JSONHandler）
+- ​格式化输出​ → 根据 Handler 类型生成文本/JSON
+（TextHandler.format() / JSONHandler.appendValue()）
+- ​缓冲写入​ → 最终输出到目标 io.Writer
+（带 bufio.Writer 缓存）
+
+---
+
 ### 3. Handler 接口：处理器
 
 **源码定位**​：`log/slog/handler.go`
 
+```go
+type Handler interface {
+    Handle(context.Context, Record) error   // ! 关键方法：处理日志记录
+    WithAttrs([]Attr) Handler               // 复制处理器并添加属性
+    WithGroup(string) Handler               // 创建属性分组
+    Enabled(context.Context, Level) bool    // 动态级别检查
+}
+```
+
 ---
+
+#### 3.1 通用处理器：commonHandler
+
+通用处理器定义了处理器的基础能力属性。
+
+```go
+type commonHandler struct {
+    // 结构化控制字段 json bool
+    // true => output JSON; false => output text
+	json              bool 
+    // HandlerOptions 处理器选项
+	opts              HandlerOptions
+	preformattedAttrs []byte
+    // groupPrefix 仅用于文本处理函数
+	groupPrefix string
+	groups      []string // all groups started from WithGroup
+	nOpenGroups int      // the number of groups opened in preformattedAttrs
+	mu          *sync.Mutex
+	w           io.Writer
+}
+
+// HandlerOptions are options for a [TextHandler] or [JSONHandler].
+// A zero HandlerOptions consists entirely of default values.
+type HandlerOptions struct {
+    // 启用时（true），记录日志语句的源代码位置（如文件名和行号）。
+    // 位置信息会以 SourceKey 属性（默认键为 "source"）添加到输出中。
+    // ​默认值​：false（不记录源代码位置）。
+	AddSource bool
+    // 定义日志记录的最低级别门槛（如 LevelInfo、LevelError），​低于此级别的日志会被丢弃。
+    // 如果为 nil，则默认使用 LevelInfo 作为最低级别。
+    // 支持动态调整级别（如通过 LevelVar 在运行时修改）。
+	Level Leveler
+    // 用于自定义属性（Attribute）的预处理逻辑。
+	ReplaceAttr func(groups []string, a Attr) Attr
+}
+```
+
+---
+
+#### 3.2 文本处理器：TextHandler
+
+```go
+// TextHandler 是一个 [处理器]。
+// 它会将记录以键值对的形式（通过空格分隔，并在每对后跟一个换行符）写入到 [io.Writer] 中。
+type TextHandler struct {
+	*commonHandler
+}
+
+// NewTextHandler creates a [TextHandler] that writes to w,
+// using the given options.
+// If opts is nil, the default options are used.
+func NewTextHandler(w io.Writer, opts *HandlerOptions) *TextHandler {
+	if opts == nil {
+		opts = &HandlerOptions{}
+	}
+	return &TextHandler{
+		&commonHandler{
+			json: false,
+			w:    w,
+			opts: *opts,
+			mu:   &sync.Mutex{},
+		},
+	}
+}
+
+// 处理器调用
+func (h *TextHandler) Handle(_ context.Context, r Record) error {
+	return h.commonHandler.handle(r)
+}
+```
+
+---
+
+#### 3.3 JSON 格式处理器：JSONHandler
+
+```go
+// JSONHandler is a [Handler] that writes Records to an [io.Writer] as
+// line-delimited JSON objects.
+type JSONHandler struct {
+	*commonHandler
+}
+
+// NewJSONHandler creates a [JSONHandler] that writes to w,
+// using the given options.
+// If opts is nil, the default options are used.
+func NewJSONHandler(w io.Writer, opts *HandlerOptions) *JSONHandler {
+	if opts == nil {
+		opts = &HandlerOptions{}
+	}
+	return &JSONHandler{
+		&commonHandler{
+			json: true,
+			w:    w,
+			opts: *opts,
+			mu:   &sync.Mutex{},
+		},
+	}
+}
+
+func (h *JSONHandler) Handle(_ context.Context, r Record) error {
+	return h.commonHandler.handle(r)
+}
+```
+
+---
+
+#### 3.4 commonHandler.handle()
+
+- **代码逻辑**
+
+```plaintext
+开始
+  │
+  ├─ 初始化缓冲区
+  ├─ JSON处理: 写入 "{"
+  │
+  ├─ 处理内置属性
+  │   ├─ 时间 → [替换函数?] → 格式化
+  │   ├─ 级别 → [替换函数?] → 格式化
+  │   ├─ 源码位置（可选）
+  │   └─ 消息 → [替换函数?] → 格式化
+  │
+  ├─ 处理非内置属性（含分组嵌套）
+  ├─ JSON处理: 闭合 "}"
+  ├─ 写入换行符
+  │
+  └─ 加锁 → 写入输出流 → 解锁
+```
+
+- **方法源码**
+> 仅展示大致内容
+```go
+// handle is the internal implementation of Handler.Handle
+// used by TextHandler and JSONHandler.
+func (h *commonHandler) handle(r Record) error {
+    // 初始化缓冲区
+	state := h.newHandleState(buffer.New(), true, "")
+	defer state.free()
+
+    // JSON处理: 写入 "{"    
+	if h.json {
+		state.buf.WriteByte('{')
+	}
+
+    // 处理内置属性
+	// time
+	if !r.Time.IsZero() {
+		// ...
+	}
+	// level
+	key := LevelKey
+	val := r.Level
+	if rep == nil {
+		// ...
+	} else {
+		// ...
+	}
+	// source
+	if h.opts.AddSource {
+		// ...
+	}
+	key = MessageKey
+	msg := r.Message
+	if rep == nil {
+		// ...
+	} else {
+		// ...
+	}
+
+    // JSON处理: 闭合 "}"
+    state.appendNonBuiltIns(r)
+	state.buf.WriteByte('\n')
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, err := h.w.Write(*state.buf)
+	return err
+}
+```
+
+---
+
+
+### 4. Record：日志数据的原子单元
+
+**源码位置**：`log/slog/record.go`
+
+```go
+const nAttrsInline = 5
+
+type Record struct {
+    Time    time.Time 
+    Message string    
+    Level   Level     
+    PC      uintptr   
+
+    front [nAttrsInline]Attr  
+    nFront int                 
+    back   []Attr              
+}
+```
+
+---
+
+#### 4.1 核心字段解析
+
+**基础信息字段**
+
+```go
+Time    time.Time // 日志事件发生的时间
+Message string    // 日志消息内容
+Level   Level     // 日志级别（如 Debug/Info/Warn/Error）
+PC      uintptr   // 程序计数器（用于溯源调用位置）
+
+// PC 字段通过 runtime.Callers 获取，​仅用于​ runtime.CallersFrames 解析调用栈
+// 特别注意：不可传给 runtime.FuncForPC，可能导致错误
+```
+
+---
+
+**属性存储优化设计**
+
+> 通过复合结构优化小量属性的内存分配
+
+```go
+front [nAttrsInline]Attr   // 内联固定大小数组（nAttrsInline=5）
+nFront int                 // 实际存储在 front 中的属性数量
+back   []Attr              // 超量属性的动态切片，存储实际日志数据
+```
+
+---
+
+**Attr字段**
+
+```go
+// An Attr is a key-value pair.
+type Attr struct {
+	Key   string
+	Value Value
+}
+```
+
+---
+
+#### 4.2 设计思想
+
+- 内存优化策略​
+    - ​小属性内联存储​：当属性 ≤ nAttrsInline 时，直接使用栈上数组，避免堆分配
+    - ​动态扩展机制​：超量属性自动转存 back 切片
+    - ​空元素检测​：未使用的 front 元素保持零值，便于错误检测
+
+- 安全使用约束
+    - 浅拷贝风险​：副本共享 back 切片的底层数组
+    - ​安全操作要求​：
+        - 需要修改时 → 用 Record.Clone() 创建深拷贝副本
+        - 创建实例 → 必须通过 NewRecord() 工厂函数
+
+- 使用场景约束
+    - 安全传递
+        - 只读场景可直接传递 Record
+    - 需要修改时，通过`Clone`方法，建立独立副本
+    - 属性访问
+        - 应使用 Record.Attrs(f func(Attr)) 方法遍历属性，而非直接访问 front/back
+```go
+// 安全传递
+// handle方法
+func (h *commonHandler) handle(r Record) error {}
+
+// 需要修改时
+// 错误：可能污染其他引用
+record := origRecord 
+record.Message = "modified"
+
+// 正确：创建独立副本
+record := origRecord.Clone()
+record.Message = "safe modification"
+```
+
+---
+
+#### 4.3 Record 创建机制
+
+```go
+// Logger.log() 内部 (log/slog/logger.go)
+func (l *Logger) log(ctx context.Context, level Level, msg string, args ...any) {
+    if !l.Enabled(ctx, level) { // 级别过滤
+        return
+    }
+    var pc uintptr
+	if !internal.IgnorePC {
+		var pcs [1]uintptr
+		// skip [runtime.Callers, this function, this function's caller]
+		runtime.Callers(3, pcs[:])
+		pc = pcs[0]
+	} // 获取调用栈信息
+    r := NewRecord(time.Now(), level, msg, pcs[0])
+    r.Add(args...) // 添加额外属性
+    _ = l.Handler().Handle(ctx, r) // 委托给Handler
+}
+```
+
+---
+
+#### 4.4 Attr：高效的数据载体
+
+- **关键设计**​：优化键值对的内存分配
+
+```go
+// log/slog/attr.go
+type Attr struct {
+    Key   string
+    Value Value
+}
+
+// Value 的内部表示 (32字节)
+type Value struct {
+    // ! 使用联合体(union)优化基础类型存储
+    num uint64    // 存放整数/浮点数/布尔值
+    str string    // 或字符串引用
+    
+    // 复杂类型降级存储
+    group []Attr  
+    any   any     // 其他类型逃逸到堆
+}
+```
+
+- 错误使用对比
+
+```go
+// ❌ 低效：引发内存逃逸，触发堆分配
+slog.Info("login", "userID", getUserID()) 
+
+// ✅ 高效：union存储，无内存逃逸
+slog.Info("login", slog.Int("userID", getUserID()))
+```
