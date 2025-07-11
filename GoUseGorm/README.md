@@ -105,4 +105,98 @@ RM是通过面向对象的方式操作数据库的**翻译官**，而GORM是Go�
 
 ---
 
+## 二、GORM 的基本配置与使用
 
+### 1. 环境安装与配置
+
+#### 1.1. 安装 GORM
+
+```bash
+go get -u gorm.io/gorm
+go get -u gorm.io/driver/mysql  # 以MySQL为例（其他数据库替换驱动即可）
+```
+
+---
+
+#### 1.2. 数据库连接配置
+
+关于DSN说明：
+- `parseTime=True`：确保时间字段正确解析为 time.Time
+- `loc=Local`：设置时区为系统本地时区（我们一般都是：Asia/Shanghai）
+
+```go
+package main
+
+import (
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+)
+
+func main() {
+	// 定义DSN (Data Source Name)
+	dsn := "user:pass@tcp(127.0.0.1:3306)/dbname?charset=utf8mb4&parseTime=True&loc=Local"
+	
+	// 建立连接
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		panic("数据库连接失败: " + err.Error())
+	}
+	
+	// 获取底层数据库连接池（重要！）
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close() // 程序退出时关闭连接，defer关闭连接防止泄露
+	
+	// 连接池配置
+	sqlDB.SetMaxOpenConns(100) // 最大连接数
+	sqlDB.SetMaxIdleConns(10)  // 最大空闲连接
+}
+```
+
+
+---
+
+### 2. 模型定义的最佳实践
+
+#### 2.1. 基础模型定义
+
+```go
+type User struct {
+	ID        int64     `gorm:"primaryKey"`
+	Name      string    `gorm:"type:varchar(100);not null"`
+	Email     string    `gorm:"type:varchar(100);uniqueIndex"`
+	CreatedAt time.Time // 自动记录创建时间（GORM约定）
+	UpdatedAt time.Time // 自动记录更新时间（GORM约定）
+}
+```
+
+---
+
+#### 2.2. 常用的 GORM 标签
+
+|标签	|作用	|示例|
+|:-----|:-----|:-----|
+|primaryKey	|设为主键	|gorm:"primaryKey"|
+|uniqueIndex	|创建唯一索引	|gorm:"uniqueIndex"|
+|not null	|非空约束	|gorm:"not null"|
+|column	|自定义列名	|gorm:"column:user_name"|
+|default	|设置默认值	|gorm:"default:'unknown'"|
+|-	|忽略字段	|gorm:"-"|
+
+----
+
+#### 2.3. 模型嵌入用法
+
+```go
+// 封装公用字段
+type BaseModel struct {
+	ID        int64 `gorm:"primaryKey"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type Product struct {
+	BaseModel // 嵌入
+	Name      string
+	Price     float64
+}
+```
